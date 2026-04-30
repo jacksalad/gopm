@@ -1,6 +1,6 @@
-# Binaries
-gopm
-gopm.exe
+# Binaries (root-level only)
+/gopm
+/gopm.exe
 *.exe
 
 # Go

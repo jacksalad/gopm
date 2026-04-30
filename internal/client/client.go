@@ -254,7 +254,9 @@ func (c *Client) handleNewConn(msg *protocol.NewConnMsg) {
 	common.Info("data tunnel established: conn_id=%s local=%s", msg.ConnID, c.cfg.LocalAddr)
 
 	// Bridge: dataConn <-> localConn
-	common.PipeConns(dataConn, localConn)
+	// Use bufio-wrapped reader/writer for dataConn to avoid losing buffered data
+	// from ReadMessage(join_ok). The localConn uses raw net.Conn (no bufio wrapper).
+	common.PipeRW(dataReader, dataWriter, localConn, localConn, func() { dataConn.Close() }, func() { localConn.Close() })
 }
 
 // Stop signals the client to stop.
