@@ -5,16 +5,17 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 var (
-	verbose = false
+	verbose atomic.Bool
 	logMu   sync.Mutex
 )
 
 // SetVerbose sets the global verbose flag.
 func SetVerbose(v bool) {
-	verbose = v
+	verbose.Store(v)
 }
 
 func logf(level, format string, args ...any) {
@@ -41,7 +42,7 @@ func Error(format string, args ...any) {
 
 // Debug logs a debug-level message (only when verbose).
 func Debug(format string, args ...any) {
-	if verbose {
+	if verbose.Load() {
 		logf("DEBUG", format, args...)
 	}
 }

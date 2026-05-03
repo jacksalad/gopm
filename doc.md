@@ -44,7 +44,7 @@ curl http://<公网IP>:8080
 ### 服务端
 
 ```bash
-./gopm -mode server -port <控制端口> [-token <token>] [-verbose]
+./gopm -mode server -port <控制端口> [-token <token>] [-timeout <秒>] [-verbose]
 ```
 
 | 参数 | 说明 | 必填 | 示例 |
@@ -52,12 +52,13 @@ curl http://<公网IP>:8080
 | `-mode` | 运行模式，固定为 `server` | 是 | `server` |
 | `-port` | 控制端口，接收客户端连接 | 是 | `9000` |
 | `-token` | 鉴权令牌，客户端必须提供相同值 | 否 | `abc123` |
+| `-timeout` | 自动关闭时长（秒），0 为永久运行 | 否 | `3600` |
 | `-verbose` | 输出详细调试日志 | 否 | |
 
 ### 客户端
 
 ```bash
-./gopm -mode client -server <地址> -local <本地地址> -map <端口> [-token <token>] [-name <名称>] [-retry] [-verbose]
+./gopm -mode client -server <地址> -local <本地地址> -map <端口> [-token <token>] [-name <名称>] [-retry] [-timeout <秒>] [-verbose]
 ```
 
 | 参数 | 说明 | 必填 | 示例 |
@@ -69,6 +70,7 @@ curl http://<公网IP>:8080
 | `-token` | 鉴权令牌，需与服务端一致 | 否 | `abc123` |
 | `-name` | 客户端标识名称，用于日志 | 否 | `dev-macbook` |
 | `-retry` | 启用断线自动重连 | 否 | |
+| `-timeout` | 自动关闭时长（秒），0 为永久运行 | 否 | `3600` |
 | `-verbose` | 输出详细调试日志 | 否 | |
 
 ---
@@ -135,6 +137,20 @@ curl http://<公网IP>:8080
 # 客户端 B：映射 API 服务
 ./gopm -mode client -server 1.2.3.4:9000 -local 8080 -map 9090
 ```
+
+### 场景五：临时调试，定时自动关闭
+
+使用 `-timeout` 设置自动关闭时长（秒），适合临时调试场景，避免忘记关闭进程：
+
+```bash
+# 公网服务器，1 小时后自动关闭
+./gopm -mode server -port 9000 -timeout 3600
+
+# 内网机器，30 分钟后自动关闭
+./gopm -mode client -server 1.2.3.4:9000 -local 8080 -map 8080 -timeout 1800
+```
+
+超时后会自动触发优雅关闭，打印日志并退出。默认值为 0（永久运行）。
 
 ---
 

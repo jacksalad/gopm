@@ -6,12 +6,19 @@ import (
 	"fmt"
 )
 
+// MaxMessageSize is the maximum allowed size for a single JSON-line message (4 KiB).
+const MaxMessageSize = 4096
+
 // ReadMessage reads a single JSON-line message from the buffered reader.
 // Returns the message type and raw JSON bytes.
+// Rejects messages larger than MaxMessageSize to prevent memory exhaustion attacks.
 func ReadMessage(r *bufio.Reader) (msgType string, data []byte, err error) {
 	line, err := r.ReadBytes('\n')
 	if err != nil {
 		return "", nil, err
+	}
+	if len(line) > MaxMessageSize {
+		return "", nil, fmt.Errorf("message too large: %d bytes (max %d)", len(line), MaxMessageSize)
 	}
 	var base BaseMessage
 	if err := json.Unmarshal(line, &base); err != nil {

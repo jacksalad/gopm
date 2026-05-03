@@ -13,15 +13,16 @@ import (
 
 // Mapping holds a single port mapping registration.
 type Mapping struct {
-	MapPort    int
-	LocalAddr  string
-	ClientName string
+	MapPort     int
+	LocalAddr   string
+	ClientName  string
 	ControlConn net.Conn
-	Writer     *bufio.Writer
-	Reader     *bufio.Reader
-	Listener   net.Listener
-	LastSeen   time.Time
-	done       chan struct{}
+	Writer      *bufio.Writer
+	writeMu     sync.Mutex // protects Writer from concurrent writes
+	Reader      *bufio.Reader
+	Listener    net.Listener
+	LastSeen    time.Time
+	done        chan struct{}
 }
 
 // PendingConn holds a public connection waiting for a client data connection.
@@ -42,8 +43,9 @@ type Server struct {
 	mu       sync.RWMutex
 	mappings map[int]*Mapping          // map_port -> Mapping
 	pending  map[string]*PendingConn   // conn_id -> PendingConn
+	done     chan struct{}             // signals server shutdown
+	ln       net.Listener
 }
-
 // NewServer creates a new server instance.
 func NewServer(controlPort int, token string, verbose bool) *Server {
 	return &Server{
@@ -52,26 +54,46 @@ func NewServer(controlPort int, token string, verbose bool) *Server {
 		verbose:     verbose,
 		mappings:    make(map[int]*Mapping),
 		pending:     make(map[string]*PendingConn),
+		done:        make(chan struct{}),
 	}
 }
 
-// Run starts the server and blocks until fatal error.
+// Run starts the server and blocks until Shutdown is called or a fatal error occurs.
 func (s *Server) Run() error {
 	addr := fmt.Sprintf(":%d", s.controlPort)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
+	s.ln = ln
 	common.Info("server listening on %s", addr)
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			common.Warn("accept error: %v", err)
-			continue
+			select {
+			case <-s.done:
+				return nil // graceful shutdown
+			default:
+				common.Warn("accept error: %v", err)
+				continue
+			}
 		}
 		go s.handleConn(conn)
 	}
+}
+
+// Shutdown gracefully stops the server, closing all mappings and the listener.
+func (s *Server) Shutdown() {
+	close(s.done)
+	if s.ln != nil {
+		s.ln.Close()
+	}
+	s.mu.Lock()
+	for port := range s.mappings {
+		s.removeMappingLocked(port)
+	}
+	s.mu.Unlock()
 }
 
 func (s *Server) handleConn(conn net.Conn) {
@@ -154,11 +176,14 @@ func (s *Server) handleRegister(conn net.Conn, reader *bufio.Reader, writer *buf
 	s.mu.Unlock()
 
 	// Send register_ok
-	if err := protocol.WriteMessage(writer, &protocol.RegisterOK{
+	m.writeMu.Lock()
+	err = protocol.WriteMessage(writer, &protocol.RegisterOK{
 		Type:    protocol.TypeRegisterOK,
 		MapPort: req.MapPort,
 		Message: "ok",
-	}); err != nil {
+	})
+	m.writeMu.Unlock()
+	if err != nil {
 		common.Warn("failed to send register_ok: %v", err)
 		s.removeMapping(req.MapPort)
 		return
@@ -173,6 +198,9 @@ func (s *Server) handleRegister(conn net.Conn, reader *bufio.Reader, writer *buf
 
 	// Start accepting public connections on map port
 	go s.acceptPublicConns(m)
+
+	// Start heartbeat health check
+	go s.healthCheck(m)
 
 	// Read loop for control messages (ping)
 	s.controlReadLoop(m)
@@ -198,10 +226,12 @@ func (s *Server) controlReadLoop(m *Mapping) {
 			if err := protocol.DecodeMessage(data, &ping); err != nil {
 				continue
 			}
+			m.writeMu.Lock()
 			protocol.WriteMessage(m.Writer, &protocol.PongMsg{
 				Type: protocol.TypePong,
 				Ts:   ping.Ts,
 			})
+			m.writeMu.Unlock()
 			common.Debug("ping/pong map=%d", m.MapPort)
 
 		default:
@@ -254,25 +284,16 @@ func (s *Server) handlePublicConn(m *Mapping, pubConn net.Conn) {
 	s.pending[connID] = pending
 	s.mu.Unlock()
 
-	// Notify client
-	s.mu.RLock()
-	writer := m.Writer
-	s.mu.RUnlock()
-
-	if writer == nil {
-		s.mu.Lock()
-		delete(s.pending, connID)
-		s.mu.Unlock()
-		pubConn.Close()
-		return
-	}
-
-	err := protocol.WriteMessage(writer, &protocol.NewConnMsg{
+	// Notify client via control connection (protected by writeMu)
+	m.writeMu.Lock()
+	err := protocol.WriteMessage(m.Writer, &protocol.NewConnMsg{
 		Type:    protocol.TypeNewConn,
 		ConnID:  connID,
 		MapPort: m.MapPort,
 		SrcAddr: srcAddr,
 	})
+	m.writeMu.Unlock()
+
 	if err != nil {
 		common.Warn("failed to send new_conn to client: %v", err)
 		s.mu.Lock()
@@ -280,6 +301,26 @@ func (s *Server) handlePublicConn(m *Mapping, pubConn net.Conn) {
 		s.mu.Unlock()
 		pending.timer.Stop()
 		pubConn.Close()
+	}
+
+}
+// healthCheck monitors heartbeat timeout for a mapping.
+// If no message is received within 45 seconds, the mapping is removed.
+func (s *Server) healthCheck(m *Mapping) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if time.Since(m.LastSeen) > 45*time.Second {
+				common.Warn("heartbeat timeout for map=%d, removing mapping", m.MapPort)
+				s.removeMapping(m.MapPort)
+				return
+			}
+		case <-m.done:
+			return
+		}
 	}
 }
 
@@ -322,13 +363,17 @@ func (s *Server) handleJoin(conn net.Conn, reader *bufio.Reader, writer *bufio.W
 func (s *Server) removeMapping(mapPort int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.removeMappingLocked(mapPort)
+}
 
+// removeMappingLocked removes a mapping. Caller must hold s.mu.
+func (s *Server) removeMappingLocked(mapPort int) {
 	m, ok := s.mappings[mapPort]
 	if !ok {
 		return
 	}
 
-	// Signal accept loop to stop
+	// Signal accept loop and healthCheck to stop
 	close(m.done)
 
 	// Close listener
@@ -362,10 +407,13 @@ func (s *Server) checkToken(clientToken string) bool {
 }
 
 func (s *Server) sendError(conn net.Conn, writer *bufio.Writer, msgType, errMsg string) {
-	msg := map[string]string{
-		"type":  msgType,
-		"error": errMsg,
+	switch msgType {
+	case protocol.TypeRegisterErr:
+		protocol.WriteMessage(writer, &protocol.RegisterError{Type: msgType, Error: errMsg})
+	case protocol.TypeJoinErr:
+		protocol.WriteMessage(writer, &protocol.JoinError{Type: msgType, Error: errMsg})
+	default:
+		protocol.WriteMessage(writer, map[string]string{"type": msgType, "error": errMsg})
 	}
-	protocol.WriteMessage(writer, msg)
 	conn.Close()
 }

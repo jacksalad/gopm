@@ -28,12 +28,18 @@ func PipeConns(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 
 	go func() {
-		io.Copy(a, b)
+		_, err := io.Copy(a, b)
+		if err != nil {
+			Debug("pipe %s->%s: %v", b.RemoteAddr(), a.RemoteAddr(), err)
+		}
 		done <- struct{}{}
 	}()
 
 	go func() {
-		io.Copy(b, a)
+		_, err := io.Copy(b, a)
+		if err != nil {
+			Debug("pipe %s->%s: %v", a.RemoteAddr(), b.RemoteAddr(), err)
+		}
 		done <- struct{}{}
 	}()
 
@@ -51,12 +57,18 @@ func PipeRW(r1 io.Reader, w1 io.Writer, r2 io.Reader, w2 io.Writer, closeFuncs .
 	done := make(chan struct{}, 2)
 
 	go func() {
-		io.Copy(w1, r2)
+		_, err := io.Copy(w1, r2)
+		if err != nil {
+			Debug("pipe r2->w1: %v", err)
+		}
 		done <- struct{}{}
 	}()
 
 	go func() {
-		io.Copy(w2, r1)
+		_, err := io.Copy(w2, r1)
+		if err != nil {
+			Debug("pipe r1->w2: %v", err)
+		}
 		done <- struct{}{}
 	}()
 

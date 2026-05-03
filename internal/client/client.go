@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"gopm/internal/common"
@@ -28,6 +29,7 @@ type Client struct {
 	reader      *bufio.Reader
 	writer      *bufio.Writer
 	done        chan struct{}
+	stopOnce    sync.Once
 }
 
 // NewClient creates a new client instance.
@@ -261,8 +263,10 @@ func (c *Client) handleNewConn(msg *protocol.NewConnMsg) {
 
 // Stop signals the client to stop.
 func (c *Client) Stop() {
-	close(c.done)
-	if c.controlConn != nil {
-		c.controlConn.Close()
-	}
+	c.stopOnce.Do(func() {
+		close(c.done)
+		if c.controlConn != nil {
+			c.controlConn.Close()
+		}
+	})
 }
